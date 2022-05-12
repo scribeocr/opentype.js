@@ -112,15 +112,139 @@ function parseGposTable(data, start) {
 
 // GPOS Writing //////////////////////////////////////////////
 // NOT SUPPORTED
-const subtableMakers = new Array(10);
 
-function makeGposTable(gpos) {
-    return new table.Table('GPOS', [
-        {name: 'version', type: 'ULONG', value: 0x10000},
-        {name: 'scripts', type: 'TABLE', value: new table.ScriptList(gpos.scripts)},
-        {name: 'features', type: 'TABLE', value: new table.FeatureList(gpos.features)},
-        {name: 'lookups', type: 'TABLE', value: new table.LookupList(gpos.lookups, subtableMakers)}
+function makeGposTable(kerningPairs) {
+
+    var kerningArray = Object.entries(kerningPairs);
+    kerningArray.sort(function (a, b) {
+        let aLeftGlyph = parseInt(a[0].match(/\d+/)[0]);
+        let aRightGlyph = parseInt(a[0].match(/\d+$/)[0]);
+        let bLeftGlyph = parseInt(b[0].match(/\d+/)[0]);
+        let bRightGlyph = parseInt(b[0].match(/\d+$/)[0]);
+        if (aLeftGlyph < bLeftGlyph) {
+            return -1;
+        }
+        if (aLeftGlyph > bLeftGlyph) {
+            return 1;
+        }
+        if (aRightGlyph < bRightGlyph) {
+            return -1;
+        }
+        return 1;
+    });
+
+    const nPairs = kerningArray.length;
+
+    var firstGlyphs = [];
+    var kerningGlyphs2 = [];
+
+    for (let i = 0; i < nPairs; i++) {
+
+        let firstGlyph = parseInt(kerningArray[i][0].match(/\d+/)[0]);
+        let secondGlyph = parseInt(kerningArray[i][0].match(/\d+$/)[0]);
+
+        if (firstGlyph !== firstGlyphs[firstGlyphs.length - 1]) {
+            firstGlyphs.push(firstGlyph);
+            kerningGlyphs2[firstGlyphs.length - 1] = [];
+        }
+
+        kerningGlyphs2[firstGlyphs.length - 1].push([secondGlyph, kerningArray[i][1]]);
+    }
+
+    var result = new table.Table('GPOS', [
+
+        // Start of GPOS Header
+        { name: 'majorVersion', type: 'USHORT', value: 1 },
+        { name: 'minorVersion', type: 'USHORT', value: 0 },
+        { name: 'scriptListOffset', type: 'USHORT', value: 10 },
+        { name: 'featureListOffset', type: 'USHORT', value: 48 },
+        { name: 'lookupListOffset', type: 'USHORT', value: 62 },
+
+        // Offset #1
+        // Start of ScriptList
+        { name: 'scriptCount', type: 'USHORT', value: 2 },
+        // Script record
+        { name: 'scriptTag', type: 'TAG', value: 'DFLT' },
+        { name: 'scriptOffset', type: 'USHORT', value: 14 },
+        { name: 'scriptTag2', type: 'TAG', value: 'latn' },
+        { name: 'scriptOffset2', type: 'USHORT', value: 26 },
+
+        // Start of Script Table #1 (Default)
+        { name: 'defaultLangSysOffset', type: 'USHORT', value: 4 },
+        { name: 'langSysCount', type: 'USHORT', value: 0 },
+        // Start of LangySys Table
+        { name: 'lookupOrderOffset', type: 'USHORT', value: 0 }, // Reserved, null
+        { name: 'requiredFeatureIndex', type: 'USHORT', value: 65535 },
+        { name: 'featureIndexCount', type: 'USHORT', value: 1 },
+        { name: 'featureIndex', type: 'USHORT', value: 0 },
+
+        // Start of Script Table #2 (Latin)
+        { name: 'defaultLangSysOffset2', type: 'USHORT', value: 4 },
+        { name: 'langSysCount2', type: 'USHORT', value: 0 },
+        // Start of LangySys Table
+        { name: 'lookupOrderOffset2', type: 'USHORT', value: 0 }, // Reserved, null
+        { name: 'requiredFeatureIndex2', type: 'USHORT', value: 65535 },
+        { name: 'featureIndexCount2', type: 'USHORT', value: 1 },
+        { name: 'featureIndex2', type: 'USHORT', value: 0 },
+
+        // Offset #2
+        // Start of FeatureList Table
+        { name: 'featureCount', type: 'USHORT', value: 1 },
+        { name: 'featureTag', type: 'TAG', value: 'kern' },
+        { name: 'featureOffset', type: 'USHORT', value: 8 },
+
+        // Start of Feature Table
+        { name: 'featureParamsOffset', type: 'USHORT', value: 0 },
+        { name: 'lookupIndexCount', type: 'USHORT', value: 1 },
+        { name: 'lookupListIndices', type: 'USHORT', value: 0 },
+
+        // Offset #3
+        // Start of LookupList Table
+        { name: 'lookupCount', type: 'USHORT', value: 1 },
+        { name: 'lookupOffset', type: 'USHORT', value: 4 },
+        // Start of Lookup table
+        { name: 'lookupType', type: 'USHORT', value: 2 },
+        { name: 'lookupFlag', type: 'USHORT', value: 0 },
+        { name: 'subTableCount', type: 'USHORT', value: 1 },
+        { name: 'lookupOffset2', type: 'USHORT', value: 8 },
+
+        // Start of lookup subtable (actual kerning info)
+        { name: 'posFormat', type: 'USHORT', value: 1 },
+        { name: 'coverageOffset', type: 'USHORT', value: 10 + 4 * firstGlyphs.length + 4 * nPairs },
+        // X_ADVANCE only
+        { name: 'valueFormat1', type: 'USHORT', value: 4 },
+        // Omit (note: using other formats will impact offset calculations)
+        { name: 'valueFormat2', type: 'USHORT', value: 0 },
+        // pairSetCount: Number of PairSet tables
+        { name: 'pairSetCount', type: 'USHORT', value: firstGlyphs.length },
+        //   {name: 'pairSetOffsets', type: 'USHORT', value: 22},
+
     ]);
+
+    var offsetN = 10 + 2 * (firstGlyphs.length);
+    for (let i = 0; i < firstGlyphs.length; i++) {
+        result.fields.push({ name: 'pairSetOffsets', type: 'USHORT', value: offsetN });
+        offsetN = offsetN + 2 + 4 * (kerningGlyphs2[i].length);
+    }
+
+    // Add PairSet tables (one for each first letter in a kerning pair)
+    for (let i = 0; i < kerningGlyphs2.length; i++) {
+        result.fields.push({ name: 'pairValueCount', type: 'USHORT', value: kerningGlyphs2[i].length });
+        for (let j = 0; j < kerningGlyphs2[i].length; j++) {
+            result.fields.push({ name: 'secondGlyph', type: 'USHORT', value: kerningGlyphs2[i][j][0] });
+            result.fields.push({ name: 'valueRecord1', type: 'USHORT', value: kerningGlyphs2[i][j][1] });
+            // console.log("Kerning: " + kerningGlyphs2[i][j][0] + " " + kerningGlyphs2[i][j][1])
+        }
+    }
+
+    // Add Coverage tables (defines which first letters map to which PairSet table)
+    result.fields.push({ name: 'coverageFormat', type: 'USHORT', value: 1 }); // Format 1 indicates glyph pairs (format 2 uses classes of glyphs)
+    result.fields.push({ name: 'glyphCount', type: 'USHORT', value: firstGlyphs.length });
+    for (let i = 0; i < firstGlyphs.length; i++) {
+        result.fields.push({ name: 'UppercasePGlyphID', type: 'USHORT', value: firstGlyphs[i] });
+    }
+
+    return (result);
 }
 
 export default { parse: parseGposTable, make: makeGposTable };

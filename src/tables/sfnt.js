@@ -18,6 +18,7 @@ import _name from './name';
 import os2 from './os2';
 import post from './post';
 import gsub from './gsub';
+import gpos from './gpos';
 import meta from './meta';
 import colr from './colr';
 import cpal from './cpal';
@@ -307,6 +308,9 @@ function fontToSfntTable(font) {
     // Optional tables
     if (font.tables.gsub) {
         tables.push(gsub.make(font.tables.gsub));
+    }
+    if (font.kerningPairs && Object.keys(font.kerningPairs).length > 0) {
+        tables.push(gpos.make(font.kerningPairs));
     }
     if (font.tables.cpal) {
         tables.push(cpal.make(font.tables.cpal));
