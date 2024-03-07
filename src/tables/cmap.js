@@ -1,11 +1,30 @@
 // The `cmap` table stores the mappings from characters to glyphs.
 // https://www.microsoft.com/typography/OTSPEC/cmap.htm
 
-import check from '../check';
-import parse from '../parse';
-import table from '../table';
+import check from '../check.js';
+import parse from '../parse.js';
+import table from '../table.js';
+import { eightBitMacEncodings } from '../types.js';
+import { getEncoding } from '../tables/name.js';
 
-function parseCmapTableFormat12(cmap, p) {
+function parseCmapTableFormat0(cmap, p, platformID, encodingID) {
+    // Length in bytes of the index map
+    cmap.length = p.parseUShort();
+    // see https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6name.html
+    // section "Macintosh Language Codes"
+    cmap.language = p.parseUShort() - 1;
+
+    const indexMap = p.parseByteList(cmap.length);
+    const glyphIndexMap = Object.assign({}, indexMap);
+    const encoding = getEncoding(platformID, encodingID, cmap.language);
+    const decodingTable = eightBitMacEncodings[encoding];
+    for (let i = 0; i < decodingTable.length; i++) {
+        glyphIndexMap[decodingTable.charCodeAt(i)] = indexMap[0x80 + i];
+    }
+    cmap.glyphIndexMap = glyphIndexMap;
+}
+
+function parseCmapTableFormat12or13(cmap, p, format) {
     //Skip reserved.
     p.parseUShort();
 
@@ -24,7 +43,9 @@ function parseCmapTableFormat12(cmap, p) {
 
         for (let c = startCharCode; c <= endCharCode; c += 1) {
             cmap.glyphIndexMap[c] = startGlyphId;
-            startGlyphId++;
+            if (format === 12) {
+                startGlyphId++;
+            }
         }
     }
 }
@@ -78,8 +99,9 @@ function parseCmapTableFormat4(cmap, p, data, start, offset) {
     }
 }
 
+
 // Parse the `cmap` table. This table stores the mappings from characters to glyphs.
-// There are many available formats, but we only support the Windows format 4 and 12.
+// There are many available formats, but we only support the Windows format 4 and 12, and format 14 as a supplement if available.
 // This function returns a `CmapEncoding` object or null if no supported format could be found.
 function parseCmapTable(data, start) {
     const cmap = {};
@@ -87,16 +109,40 @@ function parseCmapTable(data, start) {
     check.argument(cmap.version === 0, 'cmap table version should be 0.');
 
     // The cmap table can contain many sub-tables, each with their own format.
-    // We're only interested in a "platform 0" (Unicode format) and "platform 3" (Windows format) table.
+    // We're only interested in a "platform 0" (Unicode format) and "platform 3" (Windows format) table,
+    // 
     cmap.numTables = parse.getUShort(data, start + 2);
+    let format14Parser = null;
+    let format14offset = -1;
     let offset = -1;
+    let platformId = null;
+    let encodingId = null;
+    const platform0Encodings = [0,1,2,3,4,6];
+    const platform3Encodings = [0,1,10];
     for (let i = cmap.numTables - 1; i >= 0; i -= 1) {
-        const platformId = parse.getUShort(data, start + 4 + (i * 8));
-        const encodingId = parse.getUShort(data, start + 4 + (i * 8) + 2);
-        if ((platformId === 3 && (encodingId === 0 || encodingId === 1 || encodingId === 10)) ||
-            (platformId === 0 && (encodingId === 0 || encodingId === 1 || encodingId === 2 || encodingId === 3 || encodingId === 4))) {
+        platformId = parse.getUShort(data, start + 4 + (i * 8));
+        encodingId = parse.getUShort(data, start + 4 + (i * 8) + 2);
+        if ((platformId === 3 && platform3Encodings.includes(encodingId)) ||
+            (platformId === 0 && platform0Encodings.includes(encodingId)) ||
+            (platformId === 1 && encodingId === 0) // MacOS <= 9
+        ) {
+            // only use the first supported table
+            if (offset > 0) continue;
             offset = parse.getULong(data, start + 4 + (i * 8) + 4);
-            break;
+            // allow for early break
+            if (format14Parser) {
+                break;
+            }
+        } else if (platformId === 0 && encodingId === 5) {
+            format14offset = parse.getULong(data, start + 4 + (i * 8) + 4);
+            format14Parser = new parse.Parser(data, start + format14offset);
+            if (format14Parser.parseUShort() !== 14) {
+                format14offset = -1;
+                format14Parser = null;
+            } else if (offset > 0) {
+                // we already got the regular table, early break
+                break;
+            }
         }
     }
 
@@ -108,12 +154,17 @@ function parseCmapTable(data, start) {
     const p = new parse.Parser(data, start + offset);
     cmap.format = p.parseUShort();
 
-    if (cmap.format === 12) {
-        parseCmapTableFormat12(cmap, p);
+    if (cmap.format === 0) {
+        parseCmapTableFormat0(cmap, p, platformId, encodingId);
+    } else if (cmap.format === 12 || cmap.format === 13) {
+        parseCmapTableFormat12or13(cmap, p, cmap.format);
     } else if (cmap.format === 4) {
         parseCmapTableFormat4(cmap, p, data, start, offset);
     } else {
-        throw new Error('Only format 4 and 12 cmap tables are supported (found format ' + cmap.format + ').');
+        throw new Error(
+            'Only format 0 (platformId 1, encodingId 0), 4, 12 and 14 cmap tables are supported ' +
+            '(found format ' + cmap.format + ', platformId ' + platformId + ', encodingId ' + encodingId + ').'
+        );
     }
 
     return cmap;
@@ -165,14 +216,14 @@ function makeCmapTable(glyphs) {
     ];
 
     if (!isPlan0Only)
-        cmapTable = cmapTable.concat([
+        cmapTable.push(...[
             // CMAP 12 header
             {name: 'cmap12PlatformID', type: 'USHORT', value: 3}, // We encode only for PlatformID = 3 (Windows) because it is supported everywhere
             {name: 'cmap12EncodingID', type: 'USHORT', value: 10},
             {name: 'cmap12Offset', type: 'ULONG', value: 0}
         ]);
 
-    cmapTable = cmapTable.concat([
+    cmapTable.push(...[
         // CMAP 4 Subtable
         {name: 'format', type: 'USHORT', value: 4},
         {name: 'cmap4Length', type: 'USHORT', value: 0},
@@ -191,11 +242,10 @@ function makeCmapTable(glyphs) {
         for (let j = 0; j < glyph.unicodes.length; j += 1) {
             addSegment(t, glyph.unicodes[j], i);
         }
-
-        t.segments = t.segments.sort(function (a, b) {
-            return a.start - b.start;
-        });
     }
+    t.segments.sort(function (a, b) {
+        return a.start - b.start;
+    });
 
     addTerminatorSegment(t);
 
@@ -222,12 +272,12 @@ function makeCmapTable(glyphs) {
 
         // CMAP 4
         if (segment.end <= 65535 && segment.start <= 65535) {
-            endCounts = endCounts.concat({name: 'end_' + i, type: 'USHORT', value: segment.end});
-            startCounts = startCounts.concat({name: 'start_' + i, type: 'USHORT', value: segment.start});
-            idDeltas = idDeltas.concat({name: 'idDelta_' + i, type: 'SHORT', value: segment.delta});
-            idRangeOffsets = idRangeOffsets.concat({name: 'idRangeOffset_' + i, type: 'USHORT', value: segment.offset});
+            endCounts.push({name: 'end_' + i, type: 'USHORT', value: segment.end});
+            startCounts.push({name: 'start_' + i, type: 'USHORT', value: segment.start});
+            idDeltas.push({name: 'idDelta_' + i, type: 'SHORT', value: segment.delta});
+            idRangeOffsets.push({name: 'idRangeOffset_' + i, type: 'USHORT', value: segment.offset});
             if (segment.glyphId !== undefined) {
-                glyphIds = glyphIds.concat({name: 'glyph_' + i, type: 'USHORT', value: segment.glyphId});
+                glyphIds.push({name: 'glyph_' + i, type: 'USHORT', value: segment.glyphId});
             }
         } else {
             // Skip Unicode > 65535 (16bit unsigned max) for CMAP 4, will be added in CMAP 12
@@ -237,9 +287,9 @@ function makeCmapTable(glyphs) {
         // CMAP 12
         // Skip Terminator Segment
         if (!isPlan0Only && segment.glyphIndex !== undefined) {
-            cmap12Groups = cmap12Groups.concat({name: 'cmap12Start_' + i, type: 'ULONG', value: segment.start});
-            cmap12Groups = cmap12Groups.concat({name: 'cmap12End_' + i, type: 'ULONG', value: segment.end});
-            cmap12Groups = cmap12Groups.concat({name: 'cmap12Glyph_' + i, type: 'ULONG', value: segment.glyphIndex});
+            cmap12Groups.push({name: 'cmap12Start_' + i, type: 'ULONG', value: segment.start});
+            cmap12Groups.push({name: 'cmap12End_' + i, type: 'ULONG', value: segment.end});
+            cmap12Groups.push({name: 'cmap12Glyph_' + i, type: 'ULONG', value: segment.glyphIndex});
         }
     }
 
@@ -249,12 +299,22 @@ function makeCmapTable(glyphs) {
     t.entrySelector = Math.log(t.searchRange / 2) / Math.log(2);
     t.rangeShift = t.segCountX2 - t.searchRange;
 
-    t.fields = t.fields.concat(endCounts);
+    for (let i = 0; i < endCounts.length; i++) {
+        t.fields.push(endCounts[i]);
+    }
     t.fields.push({name: 'reservedPad', type: 'USHORT', value: 0});
-    t.fields = t.fields.concat(startCounts);
-    t.fields = t.fields.concat(idDeltas);
-    t.fields = t.fields.concat(idRangeOffsets);
-    t.fields = t.fields.concat(glyphIds);
+    for (let i = 0; i < startCounts.length; i++) {
+        t.fields.push(startCounts[i]);
+    }
+    for (let i = 0; i < idDeltas.length; i++) {
+        t.fields.push(idDeltas[i]);
+    }
+    for (let i = 0; i < idRangeOffsets.length; i++) {
+        t.fields.push(idRangeOffsets[i]);
+    }
+    for (let i = 0; i < glyphIds.length; i++) {
+        t.fields.push(glyphIds[i]);
+    }
 
     t.cmap4Length = 14 + // Subtable header
         endCounts.length * 2 +
@@ -270,7 +330,7 @@ function makeCmapTable(glyphs) {
             cmap12Groups.length * 4;
 
         t.cmap12Offset = 12 + (2 * 2) + 4 + t.cmap4Length;
-        t.fields = t.fields.concat([
+        t.fields.push(...[
             {name: 'cmap12Format', type: 'USHORT', value: 12},
             {name: 'cmap12Reserved', type: 'USHORT', value: 0},
             {name: 'cmap12Length', type: 'ULONG', value: cmap12Length},
@@ -278,7 +338,10 @@ function makeCmapTable(glyphs) {
             {name: 'cmap12nGroups', type: 'ULONG', value: cmap12Groups.length / 3}
         ]);
 
-        t.fields = t.fields.concat(cmap12Groups);
+        for (let i = 0; i < cmap12Groups.length; i++) {
+            t.fields.push(cmap12Groups[i]);
+        }
+        
     }
 
     return t;
