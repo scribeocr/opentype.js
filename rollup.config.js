@@ -1,7 +1,8 @@
 var buble = require('rollup-plugin-buble');
 var resolve = require('rollup-plugin-node-resolve');
 var commonjs = require('rollup-plugin-commonjs');
-var license = require('rollup-plugin-license');
+// var license = require('rollup-plugin-license');
+import { terser } from 'rollup-plugin-terser';
 
 module.exports = {
     input: 'src/index.js',
@@ -26,10 +27,11 @@ module.exports = {
         }),
         commonjs(),
         buble(),
-        license({
-            banner: 'https://opentype.js.org v<%= pkg.version %> | (c) Frederik De Bleser and other contributors | MIT License | Uses tiny-inflate by Devon Govett' +
-            ' and string.prototype.codepointat polyfill by Mathias Bynens'
-        })
+        // license({
+        //     banner: 'https://opentype.js.org v<%= pkg.version %> | (c) Frederik De Bleser and other contributors | MIT License | Uses tiny-inflate by Devon Govett' +
+        //     ' and string.prototype.codepointat polyfill by Mathias Bynens'
+        // }),
+        terser(),
     ],
     watch: {
         include: 'src/**'
